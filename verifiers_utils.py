@@ -87,6 +87,53 @@ class DINOVerifier:
 
         return loss
     
+class DINOFaceVerifier:
+    def __init__(
+            self,
+            dino,
+            face_app,
+            device="cuda"
+    ):
+        self.dino = dino
+        self.face_app = face_app  
+        self.device = device
+        self.ref_embedding = None         # pre-computed, no grad needed
+        self.ref_box = None
+
+    def set_reference(self, ref_image_tensor):  # (1, 3, H, W) in [-1, 1]
+        img_np = ((ref_image_tensor[0].permute(1,2,0).cpu().numpy() + 1) * 127.5).astype(np.uint8)[:,:,::-1]
+        faces = self.face_app.get(img_np)
+        # store bounding box as oracle
+        self.ref_box = faces[0].bbox.astype(int)
+        with torch.no_grad():
+            crop = self._crop(ref_image_tensor, self.ref_box)
+            self.ref_embedding = self.dino(crop)
+
+    def _crop(self, x, box):
+        x1, y1, x2, y2 = box
+        crop = x[:, :, y1:y2, x1:x2]
+        crop = F.interpolate(crop.to(self.device), size=224, mode='bicubic')
+        # remap [-1,1] → ImageNet-normalized
+        crop = (crop + 1) / 2  # → [0,1]
+        mean = torch.tensor(IMAGENET_DEFAULT_MEAN, device=self.device).view(1,3,1,1)
+        std  = torch.tensor(IMAGENET_DEFAULT_STD,  device=self.device).view(1,3,1,1)
+        return (crop - mean) / std
+
+    def compute_loss(self, x0_pred):  # x0_pred: (1, 3, H, W) in [-1, 1], WITH grad
+        # detect box on current prediction — oracle, no grad
+        with torch.no_grad():
+            img_np = ((x0_pred[0].detach().permute(1,2,0).cpu().float().numpy() + 1) * 127.5).astype(np.uint8)[:,:,::-1]
+            faces = self.face_app.get(img_np)
+        
+        if not faces:
+            return (x0_pred * 0).sum()  # zero but has grad_fn
+        
+        box = faces[0].bbox.astype(int)
+        crop = self._crop(x0_pred, box)          # ← in grad graph
+        emb = self.dino(crop)               # ← in grad graph
+        loss = torch.abs(emb - self.ref_embedding).mean()
+        return loss
+    
 class IDVerifier:
     def __init__(self, face_app, device='cuda'):
         self.face_app = face_app          # InsightFace — oracle for detection only

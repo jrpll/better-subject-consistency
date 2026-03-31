@@ -1038,6 +1038,7 @@ class Flux2KleinVPSDEPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
         image_latents = None
         image_latent_ids = None
+        #condition_images = None #à virer
         if condition_images is not None:
             image_latents, image_latent_ids = self.prepare_image_latents(
                 images=condition_images,
